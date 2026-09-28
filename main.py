@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 def main():
     conn = db.connect()
     try:
+        restored = db.restore_from_snapshot(conn)
+        if restored:
+            log.info("Restored %d row(s) from committed snapshot (fresh checkout, local DB was empty)", restored)
         new_count = ingest.run(conn)
         result = checker.run(conn)
         status_counts = db.counts(conn)

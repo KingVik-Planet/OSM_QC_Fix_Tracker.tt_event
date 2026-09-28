@@ -56,9 +56,11 @@ def run(conn):
                 continue
             if s_no <= already_have:
                 continue
-            db.insert_new_issue(conn, row)
-            file_new += 1
-            new_count += 1
+            if db.insert_new_issue(conn, row):
+                file_new += 1
+                new_count += 1
+            else:
+                log.info("s_no %d: duplicate in source CSV, skipped (already inserted)", s_no)
 
         log.info("quality_check_%d.csv: %d new row(s) ingested", file_index, file_new)
 

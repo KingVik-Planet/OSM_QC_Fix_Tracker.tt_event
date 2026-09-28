@@ -8,6 +8,15 @@ rather than one call per issue, and honours the same circuit-breaker /
 per-run cap pattern as OSM_Quality_Check: if Overpass is down, log it
 clearly, leave the rest queued as still-NYF, and let the next hourly
 run pick up where this one left off.
+
+The recheck queue is a fair round-robin, not always-restart-from-row-1:
+db.fetch_open_issues() orders by "checked longest ago (or never)"
+rather than by s_no, and a row only advances in that ordering when it's
+actually evaluated (db.mark_still_open) -- a row that's merely skipped
+this run (Overpass unreachable, breaker open, inconclusive) uses
+db.mark_deferred() instead, which leaves its position untouched so it
+stays near the front of the line next run rather than being wrongly
+treated as "just had its turn".
 """
 import logging
 from datetime import datetime, timezone
@@ -138,7 +147,7 @@ def run(conn):
         s_no = row["s_no"]
         n_ids, w_ids = rr.required_ids(row)
         if (n_ids | w_ids) & unreached:
-            db.mark_still_open(conn, s_no, now, "deferred -- Overpass unreachable this run")
+            db.mark_deferred(conn, s_no, "deferred -- Overpass unreachable this run")
             deferred_count += 1
             continue
 
@@ -160,15 +169,15 @@ def run(conn):
         elif outcome.status == rr.STILL_ISSUE:
             db.mark_still_open(conn, s_no, now, outcome.note)
             still_open_count += 1
-        else:  # INCONCLUSIVE or UNSUPPORTED
-            db.mark_still_open(conn, s_no, now, outcome.note)
+        else:  # INCONCLUSIVE or UNSUPPORTED -- not a genuine confirmed check
+            db.mark_deferred(conn, s_no, outcome.note)
             deferred_count += 1
 
     for row in floating_rows:
         s_no = row["s_no"]
         self_id = int(row["osm_object_id"])
         if self_id in unreached:
-            db.mark_still_open(conn, s_no, now, "deferred -- Overpass unreachable this run")
+            db.mark_deferred(conn, s_no, "deferred -- Overpass unreachable this run")
             deferred_count += 1
             continue
         if self_id in missing:
@@ -182,19 +191,19 @@ def run(conn):
         row["_current_way"] = ways.get(self_id)
         way = ways.get(self_id)
         if way is None or len(way.get("nodes", [])) < 2:
-            db.mark_still_open(conn, s_no, now, "missing way data")
+            db.mark_deferred(conn, s_no, "missing way data")
             deferred_count += 1
             continue
 
         if fetch.overpass_circuit_is_open():
-            db.mark_still_open(conn, s_no, now, "deferred -- Overpass unreachable this run")
+            db.mark_deferred(conn, s_no, "deferred -- Overpass unreachable this run")
             deferred_count += 1
             continue
 
         try:
             endpoints_map = fetch.fetch_ways_touching_nodes([way["nodes"][0], way["nodes"][-1]])
         except fetch.OverpassUnavailable:
-            db.mark_still_open(conn, s_no, now, "deferred -- Overpass unreachable this run")
+            db.mark_deferred(conn, s_no, "deferred -- Overpass unreachable this run")
             deferred_count += 1
             continue
 

@@ -50,8 +50,11 @@ def connect():
 
 
 def insert_new_issue(conn, row):
-    """row: dict matching the original quality_check_*.csv columns, plus s_no."""
-    conn.execute(
+    """row: dict matching the original quality_check_*.csv columns, plus s_no.
+    Returns True if a row was actually inserted, False if s_no was
+    already present (upstream occasionally emits a duplicate s_no --
+    seen in practice -- which this silently and correctly dedupes)."""
+    cur = conn.execute(
         """
         INSERT OR IGNORE INTO issues
             (s_no, error_type, username, user_id, osm_location_link,
@@ -66,11 +69,23 @@ def insert_new_issue(conn, row):
             row["country"], row["detail"],
         ),
     )
+    return cur.rowcount > 0
 
 
 def fetch_open_issues(conn, limit):
+    """
+    Oldest-checked-or-never-checked first, not lowest s_no first --
+    this is what makes the recheck queue behave like a fair round-robin
+    instead of always restarting from row 1. A row whose last_checked_utc
+    is NULL (never actually evaluated yet) sorts before any row that has
+    a real timestamp, and among timestamped rows the least-recently-
+    checked goes first. See mark_deferred() vs mark_still_open() for how
+    that timestamp only advances on a genuine evaluation, never on a skip.
+    """
     cur = conn.execute(
-        "SELECT * FROM issues WHERE status = 'NYF' ORDER BY s_no LIMIT ?", (limit,)
+        "SELECT * FROM issues WHERE status = 'NYF' "
+        "ORDER BY COALESCE(last_checked_utc, '') ASC, s_no ASC LIMIT ?",
+        (limit,),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -96,10 +111,89 @@ def mark_fixed(conn, s_no, date_fixed_iso, fixed_user, fixed_changeset_id,
 
 
 def mark_still_open(conn, s_no, last_checked_iso, note=""):
+    """Use this ONLY when a real recheck ran and genuinely confirmed the
+    issue still holds -- this advances last_checked_utc, which pushes
+    the row to the back of the round-robin queue (fair: it just had its
+    turn). For anything that couldn't be evaluated this run (Overpass
+    unreachable, circuit breaker open, inconclusive, unsupported type),
+    use mark_deferred() instead so the row keeps its place in line."""
     conn.execute(
         "UPDATE issues SET last_checked_utc = ?, check_note = ? WHERE s_no = ?",
         (last_checked_iso, note, s_no),
     )
+
+
+def mark_deferred(conn, s_no, note=""):
+    """A row that was SKIPPED this run, not actually evaluated -- e.g.
+    Overpass was unreachable, the circuit breaker was open, or the
+    result was inconclusive/unsupported. Deliberately does NOT touch
+    last_checked_utc, so this row keeps whatever (possibly NULL,
+    possibly old) timestamp it already had and stays near the front of
+    the round-robin queue next run instead of being wrongly treated as
+    "just checked"."""
+    conn.execute(
+        "UPDATE issues SET check_note = ? WHERE s_no = ?",
+        (note, s_no),
+    )
+
+
+def restore_from_snapshot(conn):
+    """
+    Rebuilds the issues table from the committed fix_status_snapshot_*.csv
+    files, but ONLY if the local table is currently empty.
+
+    This exists because GitHub Actions runners are ephemeral -- each
+    hourly run gets a fresh checkout with no memory of the SQLite file
+    any previous run wrote locally (it's gitignored on purpose, since
+    committing a binary DB to git history is a bad idea). Without this,
+    every run would start from scratch: re-ingesting every row as fresh
+    NYF and wiping out every previously-recorded Fixed status.
+
+    Since the snapshot CSVs ARE committed to git, they're present on
+    every checkout, so this restores exactly where the last committed
+    run left off before ingest/check run again.
+
+    A self-hosted setup where tracker.db persists locally across runs
+    (e.g. your own crontab) never hits the "empty" condition after its
+    first run, so this is a no-op there -- the local DB stays authoritative
+    and this never overwrites it with a potentially-older committed copy.
+    """
+    if max_ingested_s_no(conn) > 0:
+        return 0  # local DB already has state -- treat it as authoritative
+
+    import csv
+
+    files = sorted(
+        glob.glob(os.path.join(config.DATA_DIR, f"{config.SNAPSHOT_BASENAME}_*.csv")),
+        key=lambda p: int(os.path.basename(p).rsplit("_", 1)[1].removesuffix(".csv")),
+    )
+    restored = 0
+    for path in files:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO issues
+                        (s_no, error_type, username, user_id, osm_location_link,
+                         changeset_id, changeset_link, osm_object_type, osm_object_id,
+                         time_utc, country, detail, status, date_fixed, fixed_user,
+                         fixed_changeset_id, fixed_changeset_link, new_osm_object_id,
+                         last_checked_utc, check_note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["s_no"], row["error_type"], row["username"], row["user_id"],
+                        row["osm_location_link"], row["changeset_id"], row["changeset_link"],
+                        row["osm_object_type"], row["osm_object_id"], row["time_utc"],
+                        row["country"], row["detail"], row["status"], row["date_fixed"],
+                        row.get("fixed_user") or None, row.get("fixed_changeset_id") or None,
+                        row.get("fixed_changeset_link") or None, row.get("new_osm_object_id") or None,
+                        row.get("last_checked_utc") or None, row.get("check_note") or None,
+                    ),
+                )
+                restored += 1
+    conn.commit()
+    return restored
 
 
 def max_ingested_s_no(conn):

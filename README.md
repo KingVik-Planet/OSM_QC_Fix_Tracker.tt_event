@@ -27,7 +27,18 @@ numbering rule), with the original columns plus:
 | `last_checked_utc` | when this row was last rechecked |
 | `check_note` | why it's still NYF / inconclusive / unsupported, for anything not a clean fix |
 
-Stored in `data/tracker.db` (SQLite). A flat, spreadsheet-friendly
+Stored in `data/tracker.db` (SQLite) -- which is intentionally **not**
+committed to git (binary diffs bloat repo history badly). Since GitHub
+Actions runners are ephemeral, each hourly run starts with an empty
+`tracker.db` and rebuilds it from the last committed
+`fix_status_snapshot_*.csv` before doing anything else
+(`db.restore_from_snapshot`) -- so state survives across runs via the
+CSVs, which *are* committed, without ever putting the raw DB file in git.
+A self-hosted setup where `tracker.db` persists locally between runs
+skips this restore automatically (it only fires when the local table is
+empty), so the local DB stays authoritative there instead.
+
+A flat, spreadsheet-friendly
 snapshot is exported to `data/fix_status_snapshot_1.csv`, `_2.csv`, ...
 (rotating at 40MB per file, same convention as `quality_check_N.csv`)
 after every run,
@@ -40,15 +51,34 @@ for feeding into a dashboard or the existing report the same way
    source repo until the first 404, inserting only rows whose `s_no` is
    greater than what's already stored. Never reprocesses old rows.
 2. **`checker.py`** -- takes up to `QCFIX_MAX_CHECK_PER_RUN` (default 300)
-   still-open (`NYF`) issues, batches every Overpass lookup they need
-   into as few HTTP calls as possible, and re-applies the *same rule*
-   that originally flagged each one (ported from `checks.py`) against
-   OSM's current data. If the condition no longer reproduces, the row
-   flips to `Fixed` and its fix columns are filled in from the object's
-   current version metadata (or, if the object was deleted, from its
-   edit history) -- no separate `/history` call needed for objects that
-   still exist, since Overpass's `out meta;` already returns the
-   changeset/user/timestamp of whichever edit last touched them.
+   still-open (`NYF`) issues, **oldest-checked-or-never-checked first**
+   (a fair round-robin, not always row 1 onward -- see below), batches
+   every Overpass lookup they need into as few HTTP calls as possible,
+   and re-applies the *same rule* that originally flagged each one
+   (ported from `checks.py`) against OSM's current data. If the
+   condition no longer reproduces, the row flips to `Fixed` and its fix
+   columns are filled in from the object's current version metadata (or,
+   if the object was deleted, from its edit history) -- no separate
+   `/history` call needed for objects that still exist, since Overpass's
+   `out meta;` already returns the changeset/user/timestamp of whichever
+   edit last touched them.
+
+### Why a round-robin queue, not "always start from row 1"
+
+If Overpass has a bad run and only gets through the first 50 of 300
+rows before the circuit breaker trips, restarting from row 1 next time
+would mean rows past #300 could go unchecked indefinitely -- a genuinely
+fixed issue sitting further down the list would never get the chance to
+be marked `Fixed`. Instead, `fetch_open_issues()` orders by
+`last_checked_utc` (never-checked/NULL first, then oldest-checked), and
+that timestamp only advances via `mark_still_open()` when a row was
+*actually* evaluated. A row that was merely skipped this run (Overpass
+unreachable, circuit breaker open, inconclusive result) goes through
+`mark_deferred()` instead, which leaves its timestamp untouched -- so it
+stays near the front of the queue and gets first priority next run,
+rather than being wrongly treated as "just had its turn". Every row gets
+a fair rotation through the queue instead of some rows monopolizing
+every run's attention while others starve behind them.
 
 ## Resilience (mirrors `OSM_Quality_Check`'s `fetch.py`)
 
