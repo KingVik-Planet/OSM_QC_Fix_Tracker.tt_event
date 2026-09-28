@@ -1,0 +1,34 @@
+name: hourly-fix-check
+
+on:
+  # Commented out on purpose -- this repo is being run from an external
+  # crontab instead (see README.md for the exact crontab line), not from
+  # GitHub Actions' own scheduler. Uncomment below if you ever want to
+  # switch to Actions-driven scheduling instead of your own cron.
+  # schedule:
+  #   - cron: "0 * * * *"
+  workflow_dispatch: {}   # still runnable manually from the Actions tab
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracker
+        run: python main.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --quiet --cached || git commit -m "Hourly fix-check run"
+          git push
