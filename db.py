@@ -8,6 +8,7 @@ perfectly as our primary key, no separate hash needed).
 """
 import sqlite3
 import os
+import glob
 import config
 
 SCHEMA = """
@@ -112,14 +113,63 @@ def counts(conn):
     return {r["status"]: r["n"] for r in cur.fetchall()}
 
 
-def export_snapshot_csv(conn, path):
+def export_snapshot_csv(conn):
+    """
+    Rewrites the full snapshot every run, split across
+    fix_status_snapshot_1.csv, _2.csv, ... capped at
+    config.SNAPSHOT_MAX_BYTES each -- same rotation convention as
+    OSM_Quality_Check's own quality_check_N.csv, so a dashboard reading
+    both series can treat them the same way.
+
+    Since this is a full rewrite (not an append log), which row lands in
+    which numbered file can shift slightly run to run as the table
+    grows -- harmless, since every run regenerates every file from
+    scratch anyway. Any leftover higher-numbered file from a run that
+    needed more files than this one does gets cleaned up so stale
+    duplicate data doesn't sit around forever.
+    """
     import csv
+
     cur = conn.execute("SELECT * FROM issues ORDER BY s_no")
     rows = cur.fetchall()
     if not rows:
         return
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
+    fieldnames = list(rows[0].keys())
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+
+    # Clean up the old, pre-rotation single-file snapshot if it's still
+    # sitting there from before this was split into numbered files.
+    legacy_path = os.path.join(config.DATA_DIR, f"{config.SNAPSHOT_BASENAME}.csv")
+    if os.path.exists(legacy_path):
+        os.remove(legacy_path)
+
+    def _open(idx):
+        path = os.path.join(config.DATA_DIR, f"{config.SNAPSHOT_BASENAME}_{idx}.csv")
+        fh = open(path, "w", newline="", encoding="utf-8")
+        w = csv.DictWriter(fh, fieldnames=fieldnames)
+        w.writeheader()
+        return fh, w
+
+    file_index = 1
+    fh, writer = _open(file_index)
+    try:
         for r in rows:
             writer.writerow(dict(r))
+            fh.flush()
+            if fh.tell() >= config.SNAPSHOT_MAX_BYTES:
+                fh.close()
+                file_index += 1
+                fh, writer = _open(file_index)
+    finally:
+        fh.close()
+
+    # Remove any higher-numbered file left over from a previous run that
+    # needed more files than this one does (shouldn't normally happen
+    # since the table only grows, but kept as a safety net).
+    for stale in glob.glob(os.path.join(config.DATA_DIR, f"{config.SNAPSHOT_BASENAME}_*.csv")):
+        try:
+            idx = int(os.path.basename(stale).rsplit("_", 1)[1].removesuffix(".csv"))
+        except (ValueError, IndexError):
+            continue
+        if idx > file_index:
+            os.remove(stale)

@@ -28,7 +28,9 @@ numbering rule), with the original columns plus:
 | `check_note` | why it's still NYF / inconclusive / unsupported, for anything not a clean fix |
 
 Stored in `data/tracker.db` (SQLite). A flat, spreadsheet-friendly
-snapshot is exported to `data/fix_status_snapshot.csv` after every run,
+snapshot is exported to `data/fix_status_snapshot_1.csv`, `_2.csv`, ...
+(rotating at 40MB per file, same convention as `quality_check_N.csv`)
+after every run,
 for feeding into a dashboard or the existing report the same way
 `OSM_Quality_Check`'s own CSVs are read.
 
@@ -90,24 +92,69 @@ pip install -r requirements.txt
 python main.py   # one manual run
 ```
 
-## Running hourly via cron
+## Running hourly via cron-job.org (recommended -- no token or script on any server)
 
-The GitHub Actions schedule in `.github/workflows/hourly.yml` is
-**commented out on purpose** -- you're running this from your own
-crontab instead. Add this line (adjust the venv path):
+This is the approach actually in use: an external scheduler
+([cron-job.org](https://cron-job.org)) makes an hourly HTTP POST
+straight to GitHub's API, which starts the `hourly-fix-check` GitHub
+Actions workflow (`.github/workflows/hourly.yml`) the same way clicking
+"Run workflow" would. That workflow runs `main.py` and commits+pushes
+`data/` using GitHub Actions' own token -- nothing lives on any server
+you manage, and no token is ever stored in this repo.
+
+Requires **Settings → Actions → General → Workflow permissions** set to
+"Read and write permissions" (see "Known limitations" below for why),
+and a GitHub PAT with `repo` scope entered directly into cron-job.org's
+own job configuration -- never into any file here. Full click-by-click
+setup: ask Claude, or see cron-job.org's job pointed at
 
 ```
-0 * * * * cd /path/to/OSM_QC_Fix_Tracker && /path/to/venv/bin/python3 main.py >> data/cron.log 2>&1
+POST https://api.github.com/repos/KingVik-Planet/OSM_QC_Fix_Tracker.tt_event/actions/workflows/hourly.yml/dispatches
+Headers: Authorization: Bearer <PAT>, Accept: application/vnd.github+json, X-GitHub-Api-Version: 2022-11-28
+Body: {"ref":"master"}
+Schedule: every hour
 ```
+
+## Alternative: running hourly via your own crontab
+
+If you'd rather run this on a server you control instead of via
+cron-job.org, `run_and_commit.sh` is provided for that -- it runs
+`main.py` then commits/pushes using a PAT you set as `QCFIX_GH_PAT` in
+your own crontab line (never inside this repo). Not needed if you're
+using the cron-job.org approach above, since GitHub Actions' own token
+already handles the push in that case.
+
+**One-time setup:**
+1. Create a GitHub Personal Access Token (classic: `repo` scope;
+   fine-grained: `Contents: Read and write`) scoped to this repo.
+2. Make sure this repo's git remote uses `https://`, not `ssh://` (check
+   with `git remote -v` -- the wrapper script rewrites the https URL to
+   inject the token; switch remotes with
+   `git remote set-url origin https://github.com/OWNER/REPO.git` if needed).
+3. Set the token wherever cron will see it -- easiest is right in the
+   crontab line itself (below), or in a file this user's shell sources.
+
+**Crontab line:**
+```
+0 * * * * QCFIX_GH_PAT=ghp_xxxxxxxxxxxxxxxxxxxx /path/to/OSM_QC_Fix_Tracker/run_and_commit.sh >> /path/to/OSM_QC_Fix_Tracker/data/cron.log 2>&1
+```
+
+`run_and_commit.sh` runs `main.py`, then commits and pushes `data/` using
+that token -- skipping the commit harmlessly if nothing changed, and
+skipping it (with a log line, not a crash) if `QCFIX_GH_PAT` isn't set
+at all, so you can also run it locally without ever pushing.
 
 Notes:
-- Use the venv's own `python3` (`which python3` after activating it),
-  not the bare system one -- cron doesn't source your shell profile.
-- `cd`-ing into the repo first keeps the relative imports (`config`,
-  `db`, etc.) resolving the same way they do when you run it by hand.
+- Set `QCFIX_PYTHON_BIN` (env var) if your venv's `python3` isn't at the
+  default `./venv/bin/python3` the script assumes.
 - `data/cron.log` accumulates the same style of run-summary lines you'd
   see running it manually -- tail it to watch circuit-breaker/deferred
   messages the same way you would in `OSM_Quality_Check`'s own log.
+- The `.github/workflows/hourly.yml` file is still there and still works
+  for manual `workflow_dispatch` test runs from the Actions tab -- just
+  make sure **Settings → Actions → General → Workflow permissions** is
+  set to "Read and write permissions" if you ever use it that way,
+  since that setting overrides the `permissions:` block in the YAML.
 
 ## Configuration
 

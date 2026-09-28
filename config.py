@@ -56,7 +56,14 @@ OVERLAPPING_HIGHWAY_MIN_RATIO = float(os.getenv("QCFIX_OVERLAP_HWY_MIN_RATIO", 0
 DATA_DIR = os.getenv("QCFIX_DATA_DIR", "data")
 DB_PATH = os.path.join(DATA_DIR, "tracker.db")
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
-SNAPSHOT_CSV_PATH = os.path.join(DATA_DIR, "fix_status_snapshot.csv")
+# Rotating snapshot export, same convention as OSM_Quality_Check's own
+# quality_check_N.csv: fix_status_snapshot_1.csv, _2.csv, ... each capped
+# at CSV_MAX_BYTES. Unlike the source repo's log (which only ever
+# appends), this snapshot is fully regenerated from the DB every run, so
+# rows can shuffle between file numbers as the table grows -- that's
+# expected and harmless, since every run rewrites the whole thing anyway.
+SNAPSHOT_BASENAME = os.getenv("QCFIX_SNAPSHOT_BASENAME", "fix_status_snapshot")
+SNAPSHOT_MAX_BYTES = 40 * 1024 * 1024  # 40MB per file, matching the source repo's own cap
 
 # --- Tag-key sets, ported 1:1 from OSM_Quality_Check's config.py ------------
 # Used by the "feature mapped without primary tag" recheck so it applies

@@ -210,7 +210,7 @@ def run(conn):
             still_open_count += 1
 
     conn.commit()
-    db.export_snapshot_csv(conn, config.SNAPSHOT_CSV_PATH)
+    db.export_snapshot_csv(conn)
 
     log.info(
         "Recheck complete: %d fixed, %d still open, %d deferred (of %d checked this run)",
