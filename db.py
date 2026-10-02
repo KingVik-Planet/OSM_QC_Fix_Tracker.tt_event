@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS issues (
     fixed_changeset_link TEXT,
     new_osm_object_id   TEXT,                          -- only if the object was replaced
     last_checked_utc    TEXT,
-    check_note          TEXT                           -- why it's still NYF / inconclusive / unsupported
+    check_note          TEXT,                          -- why it's still NYF / inconclusive / unsupported
+
+    -- which #hashtag campaign this issue came from. Appended last so it
+    -- never disturbs the position of any existing column.
+    hashtag             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(osm_object_type, osm_object_id);
@@ -59,14 +63,14 @@ def insert_new_issue(conn, row):
         INSERT OR IGNORE INTO issues
             (s_no, error_type, username, user_id, osm_location_link,
              changeset_id, changeset_link, osm_object_type, osm_object_id,
-             time_utc, country, detail, status, date_fixed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NYF', 'NYF')
+             time_utc, country, detail, status, date_fixed, hashtag)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NYF', 'NYF', ?)
         """,
         (
             row["s_no"], row["error_type"], row["username"], row["user_id"],
             row["osm_location_link"], row["changeset_id"], row["changeset_link"],
             row["osm_object_type"], row["osm_object_id"], row["time_utc"],
-            row["country"], row["detail"],
+            row["country"], row["detail"], row.get("hashtag") or config.HASHTAG,
         ),
     )
     return cur.rowcount > 0
@@ -153,6 +157,15 @@ def restore_from_snapshot(conn):
     every checkout, so this restores exactly where the last committed
     run left off before ingest/check run again.
 
+    A row from a snapshot written before the "hashtag" column existed
+    falls back to config.HASHTAG here -- which, for every row this
+    tracker has ever ingested (it only ever reads from ONE fixed source
+    repo per deployment), is always correct. This is also what performs
+    the one-time backfill of that column onto all pre-existing rows:
+    the very next run after this update restores every old row with a
+    correctly-filled hashtag, then re-exports the snapshot with it
+    included -- no manual CSV edit required.
+
     A self-hosted setup where tracker.db persists locally across runs
     (e.g. your own crontab) never hits the "empty" condition after its
     first run, so this is a no-op there -- the local DB stays authoritative
@@ -178,8 +191,8 @@ def restore_from_snapshot(conn):
                          changeset_id, changeset_link, osm_object_type, osm_object_id,
                          time_utc, country, detail, status, date_fixed, fixed_user,
                          fixed_changeset_id, fixed_changeset_link, new_osm_object_id,
-                         last_checked_utc, check_note)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         last_checked_utc, check_note, hashtag)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["s_no"], row["error_type"], row["username"], row["user_id"],
@@ -189,6 +202,7 @@ def restore_from_snapshot(conn):
                         row.get("fixed_user") or None, row.get("fixed_changeset_id") or None,
                         row.get("fixed_changeset_link") or None, row.get("new_osm_object_id") or None,
                         row.get("last_checked_utc") or None, row.get("check_note") or None,
+                        row.get("hashtag") or config.HASHTAG,
                     ),
                 )
                 restored += 1

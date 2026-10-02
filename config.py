@@ -8,6 +8,13 @@ touching code.
 """
 import os
 
+# Which #hashtag's issues this tracker instance follows. This tracker
+# only ever reads from one specific OSM_Quality_Check-family source
+# (see SOURCE_REPO_RAW_BASE below), so this is fixed per deployment --
+# used to label every row with which campaign it belongs to, and as the
+# fallback value for any row ingested before that column existed.
+HASHTAG = os.getenv("QCFIX_HASHTAG", "tt_event")  # without the leading '#'
+
 # --- Where the issues come from ---------------------------------------------
 # The upstream repo that runs OSM_Quality_Check and commits its rotating
 # quality_check_*.csv files straight into its own data/ directory. This repo
